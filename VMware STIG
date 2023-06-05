@@ -1,0 +1,2416 @@
+# Created by:
+# Date: 4/6/2023
+# Version: 1.00
+
+# Is PowerShell ran as 'Admin'?
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator"))
+{
+    # Prompts user to switch PowerShell to PowerShell as Administrator
+   $arguments = "& '" + $MyInvocation.MyCommand.Definition + "'"
+    Start-Process powershell -Verb runAs -ArgumentList $arguments
+    break
+}
+
+# Set directory & Path of script as variable
+$ScriptPath      = $MyInvocation.MyCommand.Path
+$ScriptDir       = Split-Path $ScriptPath
+
+# Declare global variables
+$CAT1 = "1"
+$CAT2 = "2"
+$CAT3 = "3"
+$PASS = "PASS"
+$FAIL = "FAIL" 
+$MANUAL = "Manual Check"
+$NA = "Not Applicable"
+$PSModule_Path = "C:\Program Files\WindowsPowerShell\Modules"
+
+
+# Disclaimer & Gather Information
+Write-Host "" 
+Write-Host "Disclaimer & Prerequisites"
+Write-Host "=========================="
+Write-Host "
+
+Verion: 1.00
+
+Summary:
+    This script will automate manual DoD DISA STIG checks for VMware products. This is an alternative automated solution 
+to Ansible & Chef to perform these checks. This script is NON-INTRUSIVE, meaning it will NOT make any changes to your 
+VMware products whatsoever. It will use the offical VMware PowerCLI & PowerShell module 'Posh-SSH' to check and verify 
+various settings.
+
+Prerequistes:
+----------------
+1. VMware vSphere/vCenter/ESXi 7 with the Secure Shell feature enabled
+2. PowerShell v5.1 with the following modules installed:
+    A. PowerShell module 'PowerCLI'
+    B. PowerShell module 'Posh-SSH'
+3. A login Account of your VMware Products with admin permissions
+"
+
+#
+if (-not (Get-Module -Name "VMware.PowerCLI" -ListAvailable)) {
+    $Question = Read-Host "It seems like you dont have VMware PowerCLI, would you like to install it? (Y/N)"
+    $Question = $Question.ToLower()
+        If ($Question -eq "yes" -or "y"){
+            Copy-Item -Path $ScriptDir\VMware-PowerCLI\* -Destination $PSModule_Path -Recurse
+            Get-ChildItem $PSModule_Path -Recurse | Unblock-File
+        }
+        else {
+        Write-Host "This script will not work properly. Install it and run this script again."
+        Read-Host "Press 'enter' to exit script"
+        Exit
+        }
+}
+#
+if (-not (Get-Module -Name "Posh-SSH" -ListAvailable)) {
+    $Question2 = Read-Host "It seems like you dont have Posh-SSH, would you like to install it? (Y/N)"
+    $Question2 = $Question2.ToLower()
+        If ($Question2 -eq "yes" -or "y"){
+            Copy-Item -Path $ScriptDir\Posh-SSH -Destination $PSModule_Path -Recurse
+            Get-ChildItem $PSModule_Path -Recurse | Unblock-File
+        }
+        else {
+        Write-Host "This script will not work properly. Install it and run this script again."
+        Read-Host "Press 'enter' to exit script"
+        Exit
+        }
+}
+
+Write-Host ""
+Write-Host "Note!: To remote in, this will take a few moments."
+$VMware_IPAddress   = Read-Host -Prompt 'vSphere/ESXi IP Address'
+$VMware_UserName    = Read-Host -Prompt 'vSphere/ESXi username'
+$VMware_Password    = Read-Host -Prompt 'vSphere/ESXi password' -AsSecureString
+$VMware_Cred        = New-Object System.Management.Automation.PSCredential ($VMware_UserName, $VMware_Password)
+$SSH                = New-SSHSession -ComputerName $VMware_IPAddress -Credential $VMware_Cred
+
+# Log into VMWare product
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false -Confirm:$false
+Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false | Out-Null
+if (Connect-VIServer -Server $VMware_IPAddress -Credential $VMware_Cred -ErrorAction SilentlyContinue){
+    Write-Host ""
+    Write-Host "Connected to $VMware_IPAddress, type in your PowerCLI commands..."
+}
+else {
+    Write-Host "Error has happened, you mistyped something and try again..."
+    exit 1
+}
+
+# Version & Build
+$VMware_Version = (Get-VMHost).Version
+$VMware_Build = (Get-VMHost).Build
+
+# Menu Options
+$Options = @{
+"1" = "ESXi 7.0 STIG V1R1"
+"2" = "Virtual Machines STIG V1R1"
+"3" = ""
+"0" = "Exit"
+}
+
+# Actual Menu
+function Show-Menu {
+    Clear-Host
+    Write-Host ""
+    Write-Host "VMware vSphere/vCenter/ESXi 7.0 STIG"
+    Write-Host "===================================="
+    Write-Host "
+PowerShell 'Out-GridView':
+--------------------------
+    You will be asked to either export results to an Excel format or view them in PowerShell Grid window. Within 
+the Grid window you will have the following columns:
+
+    1. Vul-ID            = Vulnerability ID to quickly reference a DoD STIG requirement
+    2. CAT Number        = Serverity of the DoD STIG requirement (1 = High serverity)
+    3. Result            = Result of check. Three possible outcomes. (PASS, FAIL, Manual Check)
+    4. Name              = DoD STIG naming for the requirement in question
+    5. Current Setting   = A 'FAIL' as an result, output of your current setting  
+    6. Expected Setting  = What the setting should be compared to DoD STIG requirements
+    7. Comment           = My personal comments
+"
+    Write-Host "vSphere/ESXi Info:"
+    Write-Host "------------------"
+    Write-Host "    Version: " -NoNewline
+    Write-Host "$VMware_Version" -ForegroundColor Yellow
+    Write-Host "    Build: " -NoNewline
+    Write-Host "$VMware_Build" -ForegroundColor Yellow
+    Write-Host "    IP Address: " -NoNewline
+    Write-Host "$VMware_IPAddress" -ForegroundColor Yellow
+    Write-Host "    Current user: " -NoNewline
+    Write-Host "$VMware_UserName" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Menu Options:"
+
+    foreach ($option in $Options.GetEnumerator() | Sort-Object {[int]$_.Key}) {
+        Write-Host "`t$($option.Key) - $($option.Value)"
+    }
+}
+
+function Get-Choice {
+    $choice = Read-Host "`nEnter your choice (1 or 2 or 0 to exit)"
+
+    if ($choice -notin $Options.Keys) {
+        Write-Host "`nInvalid choice, please select again`n"
+        Get-Choice
+    }
+
+    return $choice
+}
+
+# Perform an action
+$Actions = @{
+
+    "1" = {
+        Clear-host
+        Write-Host ""
+        Write-Host "DoD DISA STIG Benchmark vSphere 7.0 ESXi STIG V1R1"
+        Write-Host "==================================================="
+        Write-Host ""
+
+        # Row 1
+        # V-256410
+        $variable = Get-EsxCli -v2
+        if ($variable.software.acceptance.get.Invoke -eq 'CommunitySupported') {
+            $RESULT_256410 = $FAIL
+            $output256410 = $variable.software.acceptance.get.Invoke
+        }
+        else {
+            $RESULT_256410 = $PASS
+        }
+
+        # Row 2
+        # V-256421
+        $variable1 = Get-VirtualSwitch -Standard | Get-SecurityPolicy
+        $variable2 = Get-VirtualPortGroup -Standard | Get-SecurityPolicy
+        $variablelist1 = $variable1, $variable2
+
+        foreach ($a in $variablelist1) {
+            if ($a.MacChanges -eq $true) {
+                $RESULT_256421 = $FAIL
+            }
+            else {
+                $RESULT_256421 = $PASS
+            }
+        }
+
+        # Row 3
+        # V-256428 - Manual Check
+
+        # Row 4
+        # V-256429
+        $variable3 = Get-VMHost | Get-AdvancedSetting -Name UserVars.ESXiVPsDisabledProtocols
+        if ($variable3.Value -eq 'sslv3,tlsv1,tlsv1.1') {
+            $RESULT_256429 = $PASS
+        }
+        else {
+            $RESULT_256429 = $FAIL
+            $output256429 = $variable3.Value
+        }
+
+        # Row 5
+        # V-256375
+        $variable4 = Get-VMHost | Select-Object Name,@{N="Lockdown";E={$_.Extensiondata.Config.LockdownMode}}
+        if ($variable4.Lockdown -eq 'lockdownDisabled') {
+            $RESULT_256375 = $FAIL
+            $output256375 = $variable4.Lockdown
+        }
+        else {
+            $RESULT_256375 = $PASS
+        }
+
+        # Row 6
+        # V-256376
+        $variable5 = Get-VMHost | Get-AdvancedSetting -Name DCUI.Access
+        if ($variable5.Value -eq 'root') {
+            $RESULT_256376 = $PASS
+        }
+        else {
+            $RESULT_256376 = $FAIL
+            $output256376 = $variable5.Value
+        }
+
+        # Row 7
+        # V-256377
+        $variable6 = Get-VMHost | Get-View
+        if ($variable6.ConfigManager.HostAccessManager.QueryLockdownExceptions -eq $null) {
+            $RESULT_256377 = $PASS
+        }
+        else {
+            $RESULT_256377 = $FAIL
+            $output256377 = $variable6.ConfigManager.HostAccessManager.QueryLockdownExceptions
+        }
+
+        # Row 8
+        # V-256378
+        $variable7 = Get-VMHost | Get-AdvancedSetting -Name Syslog.global.logHost
+        if ($variable7.Value -eq "") {
+            $RESULT_256378 = $FAIL
+        }
+        else {
+            $RESULT_256378 = $PASS
+        }
+
+        # Row 9
+        # V-256379
+        $variable8 = Get-VMHost | Get-AdvancedSetting -Name Security.AccountLockFailures
+        if ($variable8.Value -gt "3") {
+            $RESULT_256379 = $FAIL
+            $output256379 = $variable8.Value
+        }
+        else {
+            $RESULT_256379 = $PASS
+        }
+
+        # Row 10
+        # V-256380
+        $variable9 = Get-VMHost | Get-AdvancedSetting -Name Security.AccountUnlockTime
+        if ($variable9.Value -eq "900") {
+            $RESULT_256380 = $PASS
+        }
+        else {
+            $RESULT_256380 = $FAIL
+            $output256380 = $variable9.Value
+        }
+
+        # Row 11
+        # V-256381
+        $variable10 = Get-VMHost | Get-AdvancedSetting -Name Annotations.WelcomeMessage
+        if ($variable10.Value -eq "") {
+            $RESULT_256381 = $FAIL
+            $output256381 = $variable10.Value
+        }
+        else {
+            $RESULT_256381 = $PASS
+        }
+
+        # Row 12
+        # V-256382
+        $variable11 = Get-VMHost | Get-AdvancedSetting -Name Config.Etc.issue
+        if ($variable11.Value -eq "") {
+            $RESULT_256382 = $FAIL
+            $output256382 = $variable11.Value
+        }
+        else {
+            $RESULT_256382 = $PASS
+        }
+
+        # Row 13
+        # V-256383
+        $variable12 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep banner" | Select-Object -ExpandProperty Output
+        if ($variable12 -eq "banner /etc/issue") {
+            $RESULT_256383 = $PASS
+        }
+        else {
+            $RESULT_256383 = $FAIL
+            $output256383 = $variable12
+        }
+
+        # Row 14
+        # V-256384
+        $variable13 = Get-EsxCli -v2
+        if ($variable13.system.security.fips140.ssh.get.invoke().Enabled -eq $true) {
+            $RESULT_256384 = $PASS
+        }
+        else {
+            $RESULT_256384 = $FAIL
+            $output256384 = $variable13.system.security.fips140.ssh.get.invoke().Enabled
+        }
+
+        # Row 15
+        # V-256385
+        $variable14 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep ignorerhosts" | Select-Object -ExpandProperty Output
+        if ($variable14 -eq "ignorerhosts yes") {
+            $RESULT_256385 = $PASS
+        }
+        else {
+            $RESULT_256385 = $FAIL
+            $output256385 = $variable14
+        }
+
+        # Row 16
+        # V-256386
+        $variable15 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep hostbasedauthentication" | Select-Object -ExpandProperty Output
+        if ($variable15 -eq "hostbasedauthentication no") {
+            $RESULT_256386 = $PASS
+        }
+        else {
+            $RESULT_256386 = $FAIL
+            $output256386 = $variable15
+        }
+
+        # Row 17
+        # V-256388
+        $variable16 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep permituserenvironment" | Select-Object -ExpandProperty Output
+        if ($variable16 -eq "permituserenvironment no") {
+            $RESULT_256388 = $PASS
+        }
+        else {
+            $RESULT_256388 = $FAIL
+            $output256388 = $variable16
+        }
+
+        # Row 18
+        # V-256389
+        $variable17 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep strictmodes" | Select-Object -ExpandProperty Output
+        if ($variable17 -eq "strictmodes yes") {
+            $RESULT_256389 = $PASS
+        }
+        else {
+            $RESULT_256389 = $FAIL
+            $output256389 = $variable17
+        }
+
+        # Row 19
+        # V-256390
+        $variable18 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep compression" | Select-Object -ExpandProperty Output
+        if ($variable18 -eq "compression no") {
+            $RESULT_256390 = $PASS
+        }
+        else {
+            $RESULT_256390 = $FAIL
+            $output256390 = $variable18
+        }
+
+        # Row 20
+        # V-256392
+        $variable19 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep x11forwarding" | Select-Object -ExpandProperty Output
+        if ($variable19 -eq "x11forwarding no") {
+            $RESULT_256392 = $PASS
+        }
+        else {
+            $RESULT_256392 = $FAIL
+            $output256392 = $variable19
+        }
+
+        # Row 21
+        # V-256393
+        $variable20 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep permittunnel" | Select-Object -ExpandProperty Output
+        if ($variable20 -eq "permittunnel no") {
+            $RESULT_256393 = $PASS
+        }
+        else {
+            $RESULT_256393 = $FAIL
+            $output256393 = $variable20
+        }
+
+        # Row 22
+        # V-256396
+        $variable21 = Get-VMHost | Get-AdvancedSetting -Name Config.HostAgent.log.level
+        if ($variable21.Value -eq "info") {
+            $RESULT_256396 = $PASS
+        }
+        else {
+            $RESULT_256396 = $FAIL
+            $output256396 = $variable21
+        }
+
+        # Row 23
+        # V-256397
+        $variable22 = Get-VMHost | Get-AdvancedSetting -Name Security.PasswordQualityControl
+        if ($variable22.Value -eq "similar=deny retry=3 min=disabled,disabled,disabled,disabled,15") {
+            $RESULT_256397 = $PASS
+        }
+        else {
+            $RESULT_256397 = $FAIL
+            $output256397 = $variable22.Value
+        }
+    
+        # Row 24
+        # V-256398
+        $variable23 = Get-VMHost | Get-AdvancedSetting -Name Security.PasswordHistory
+        if ($variable23.Value -eq "5") {
+            $RESULT_256398 = $PASS
+        }
+        else {
+            $RESULT_256398 = $FAIL
+            $output256398 = $variable23.Value
+        }
+
+        # Row 25
+        # V-256399
+        $variable24 = Get-VMHost | Get-AdvancedSetting -Name Config.HostAgent.plugins.solo.enableMob
+        if ($variable24.Value -eq $false) {
+            $RESULT_256399 = $PASS
+        }
+        else {
+            $RESULT_256399 = $FAIL
+            $output256399 = $variable24.Value
+        }
+
+        # Row 26
+        # V-256400
+        $variable25 = Get-VMHost | Get-VMHostService | Where-Object {$_.Label -eq "SSH"}
+        if ($variable25.Running -eq $true) {
+            $RESULT_256400 = $FAIL
+            $output256400 = $variable25.Running
+        }
+        else {
+            $RESULT_256400 = $PASS
+        }
+
+        # Row 27
+        # V-256401
+        $variable26 = Get-VMHost | Get-VMHostService | Where-Object {$_.Label -eq "ESXi Shell"}
+        if ($variable26.Running -eq $false) {
+            $RESULT_256401 = $PASS
+        }
+        else {
+            $RESULT_256401 = $FAIL
+            $output256401 = $variable26.Running
+        }
+
+        # Row 28
+        # V-256403 (Manual Check)
+        $variable27 = Get-VMHost | Select-Object Name, ` @{N="HostProfile";E={$_ | Get-VMHostProfile}}, ` @{N="JoinADEnabled";E={($_ | Get-VmHostProfile).ExtensionData.Config.ApplyProfile.Authentication.ActiveDirectory.Enabled}}, ` @{N="JoinDomainMethod";E={(($_ | Get-VMHostProfile).ExtensionData.Config.ApplyProfile.Authentication.ActiveDirectory | Select-Object -ExpandProperty Policy | Where-Object {$_.Id -eq "JoinDomainMethodPolicy"}).Policyoption.Id}}
+        if ($variable27.JoinADEnabled -eq $true) {
+            $RESULT_256403 = $FAIL
+            $output256403 = $variable27
+        }
+        else {
+            $RESULT_256403 = $PASS
+        }
+
+        # Row 29
+        # V-256404
+        $variable28 = Get-VMHost | Get-AdvancedSetting -Name Config.HostAgent.plugins.hostsvc.esxAdminsGroup
+        if ($variable28.Value -eq "ESX Admins") {
+            $RESULT_256404 = $FAIL
+            $output256404 = $variable28.Value
+        }
+        else {
+            $RESULT_256404 = $PASS
+        }
+
+        # Row 30
+        # V-256405
+        $variable29 = Get-VMHost | Get-AdvancedSetting -Name UserVars.ESXiShellInteractiveTimeOut
+        if ($variable29.Value -eq "120") {
+            $RESULT_256405 = $PASS
+        }
+        else {
+            $RESULT_256405 = $FAIL
+            $output256405 = $variable29.Value
+        }
+
+        # Row 31
+        # V-256406
+        $variable30 = Get-VMHost | Get-AdvancedSetting -Name UserVars.ESXiShellTimeOut
+        if ($variable30.Value -eq "600") {
+            $RESULT_256406 = $PASS
+        }
+        else {
+            $RESULT_256406 = $FAIL
+            $output256406 = $variable30.Value
+        }
+
+        # Row 32
+        # V-256407
+        $variable31 = Get-VMHost | Get-AdvancedSetting -Name UserVars.DcuiTimeOut
+        if ($variable31.Value -eq "120") {
+            $RESULT_256407 = $PASS
+        }
+        else {
+            $RESULT_256407 = $FAIL
+            $output256407 = $variable31.Value
+        }
+
+        # Row 33
+        # V-256408
+        $variable32 = Get-EsxCli -v2
+        $variable33 = $variable32.system.Syslog.Config.get.Invoke() | Select-Object LocalLogOutput,LocalLogOutputIsPersistent
+        if ($variable33.LocalLogOutputIsPersistent -eq $true) {
+            $RESULT_256408 = $PASS
+        }
+        else {
+            $RESULT_256408 = $FAIL
+            $output256408 = $variable33.LocalLogOutputIsPersistent
+        }
+
+        # Row 34
+        # V-256409
+        $variable34 = Get-VMHost | Get-VMHostService | Where-Object {$_.Label -eq "NTP Daemon"}
+        if ($variable34.Policy -eq "off") {
+            $RESULT_256409 = $FAIL
+        }
+        else {
+            $RESULT_256409 = $PASS
+            $output256409 = $variable34.Policy
+        }
+
+        # Row 35
+        # V-256411 (Manual Check)
+
+        # Row 36
+        # V-256412 (Manual Check)
+
+        # Row 37
+        # V-256413 (Manual Check)
+
+        # Row 38
+        # V-256414
+        $variable35 = Get-VMHostSnmp | Select-Object *
+        if ($variable35.Enabled -eq $false) {
+            $RESULT_256414 = $PASS
+        }
+        else {
+            $RESULT_256414 = $FAIL
+            $output256414 = $variable35.Enabled
+        }
+
+        # Row 39 (Come Back later for this)
+        # V-256415
+        $variable36 = Get-VMHost | Get-VMHostHba | Where-Object {$_.Type -eq "iscsi"} | Select-Object AuthenticationProperties -ExpandProperty AuthenticationProperties
+        if ($variable36 -eq $null) {
+            $RESULT_256415 = $PASS
+        }
+        else {
+            $RESULT_256415 = $FAIL
+            $output256415 = $variable36
+        }
+
+        # Row 40
+        # V-256417 (Manual Check; vSphere)
+
+        # Row 41
+        # V-256418 (Semi-Auto)
+        $variable37 = Get-VMHostFirewallDefaultPolicy
+        if ($variable37.IncomingEnabled -eq $false) {
+            $RESULT_256418 = $PASS
+        }
+        else {
+            $RESULT_256418 = $FAIL
+            $output256418 = $variable37.IncomingEnabled
+        }
+
+        # Row 42
+        # V-256419
+        $variable38 = Get-VMHost | Get-AdvancedSetting -Name Net.BlockGuestBPDU
+        if ($variable38.Value -eq "1") {
+            $RESULT_256419 = $PASS
+        }
+        else {
+            $RESULT_256419 = $FAIL
+            $output256419 = $variable38.Value
+        }
+
+        # Row 43
+        # V-256420
+        $variable39 = Get-VirtualSwitch -Standard | Get-SecurityPolicy
+        $variable40 = Get-VirtualPortGroup -Standard | Get-SecurityPolicy
+        if ($variable39.ForgedTransmits -eq $false) {
+            $RESULT_256420 = $PASS
+        }
+        elseif ($variable40.ForgedTransmits -eq $false) {
+            $RESULT_256420 = $PASS
+        }
+        else {
+            $RESULT_256420 = $FAIL
+            $output256420 = "$variable39.ForgedTransmits"",""$variable40.ForgedTransmits"
+        }
+
+        # Row 44
+        # V-256422
+        $variable41 = Get-VirtualSwitch -Standard | Get-SecurityPolicy
+        $variable42 = Get-VirtualPortGroup -Standard | Get-SecurityPolicy
+        if ($variable41.AllowPromiscuous -eq $false) {
+            $RESULT_256422 = $PASS
+        }
+        elseif ($variable42.AllowPromiscuous -eq $false) {
+            $RESULT_256422 = $PASS
+        }
+        else {
+            $RESULT_256422 = $FAIL
+            $output256422 = "$variable41.AllowPromiscuous"",""$variable42.AllowPromiscuous"
+        }
+
+        # Row 45
+        # V-256423
+        $variable43 = Get-VMHost | Get-AdvancedSetting -Name Net.DVFilterBindIpAddress
+        if ($variable43.Value -eq $null) {
+            $RESULT_256423 = $PASS
+        }
+        else {
+            $RESULT_256423 = $FAIL
+            $output256423 = $variable43.Value
+        }
+
+        # Row 46 (Semi-Auto)
+        # V-256424 (VLAN 1 is Cisco 'Native VLAN', traffic going out will be untagged; ESXi doesnt have a 'Native VLAN' #)
+        $variable44 = Get-VirtualPortGroup -Standard | Where-Object {$_.Name -eq "VM Network"}
+        $variable45 = Get-VirtualPortGroup -Standard | Where-Object {$_.Name -eq "Management Network"}
+        if ($variable44.VLanId -eq "1") {
+            $RESULT_256424 = $FAIL
+            $output256424 = "$variable44.VLanId"",""$variable45.VLanId"
+        }
+        elseif ($variable45.VLanId -eq "1") {
+            $RESULT_256424 = $FAIL
+            $output256424 = "$variable44.VLanId"",""$variable45.VLanId"
+        }
+        else {
+            $RESULT_256424 = $PASS
+        }
+
+        # Row 47 (Semi-Auto)
+        # V-256425
+        $variable46 = Get-VirtualPortGroup -Standard | Where-Object {$_.Name -eq "VM Network"}
+        $variable47 = Get-VirtualPortGroup -Standard | Where-Object {$_.Name -eq "Management Network"}
+        if ($variable46.VLanId -eq "4095") {
+            $RESULT_256425 = $FAIL
+            $output256424 = "$variable46.VLanId"",""$variable47.VLanId"
+        }
+        elseif ($variable47.VLanId -eq "4095") {
+            $RESULT_256425 = $FAIL
+            $output256425 = "$variable46.VLanId"",""$variable47.VLanId"
+        }
+        else {
+            $RESULT_256425 = $PASS
+        }
+
+        # Row 48
+        # V-256426 (Manual Check)
+
+        # Row 49
+        # V-256427 (Not Applicable)
+
+        # Row 50
+        # V-256430
+        $variable48 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/secureboot/bin/secureBoot.py -s" | Select-Object -ExpandProperty Output
+        if ($variable48 -eq "Enabled") {
+            $RESULT_256430 = $PASS
+        }
+        else {
+            $RESULT_256430 = $FAIL
+            $output256430 = $variable48
+        }
+
+        # Row 51
+        # V-256431 
+
+        # Row 52
+        # V-256432
+        $variable49 = Get-VMHost | Get-AdvancedSetting -Name UserVars.SuppressShellWarning
+        if ($variable49.Value -eq "0") {
+            $RESULT_256432 = $PASS
+        }
+        else {
+            $RESULT_256432 = $FAIL
+            $output256432 = $variable49.Value
+        }
+
+        # Row 53
+        # V-256433
+        $variable50 = Get-VMHost | Get-AdvancedSetting -Name UserVars.SuppressHyperthreadWarning
+        if ($variable50.Value -eq "0") {
+            $RESULT_256433 = $PASS
+        }
+        else {
+            $RESULT_256433 = $FAIL
+            $output256433 = $variable50.Value
+        }
+
+        # Row 54
+        # V-256434
+        $variable51 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep allowtcpforwarding" | Select-Object -ExpandProperty Output
+        if ($variable51 -eq "allowtcpforwarding no") {
+            $RESULT_256434 = $PASS
+        }
+        else {
+            $RESULT_256434 = $FAIL
+            $output256434 = $variable51
+        }
+
+        # Row 55
+        # V-256435
+        $variable52 = Get-VMHost | Get-VMHostService | Where-Object {$_.Label -eq "slpd"}
+        if ($variable52.Policy -eq "off") {
+            $RESULT_256435 = $PASS
+        }
+        else {
+            $RESULT_256435 = $FAIL
+            $output256435 = $variable52.Policy
+        }
+
+        # Row 56
+        # V-256436 (Semi-Auto)
+        $variable53 = Get-EsxCli -v2
+        if ($variable53.system.auditrecords.get.invoke().auditrecordStorageActive -eq $true) {
+            $RESULT_256436 = $PASS
+        }
+        else {
+            $RESULT_256436 = $FAIL
+            $output256436 = $variable53.system.auditrecords.get.invoke().auditrecordStorageActive
+        }
+
+        # Row 57
+        # V-256437
+        $variable54 = Get-EsxCli -v2
+        if ($variable54.system.syslog.config.get.invoke().StrictX509Compliance -eq $true) {
+            $RESULT_256437 = $PASS
+        }
+        else {
+            $RESULT_256437 = $FAIL
+            $output256437 = $variable54.system.syslog.config.get.invoke().StrictX509Compliance
+        }
+
+        # Row 58
+        # V-256438
+        $variable55 = Get-VMHost | Get-AdvancedSetting -Name Syslog.global.logCheckSSLCerts
+        if ($variable55.Value -eq $true) {
+            $RESULT_256438 = $PASS
+        }
+        else {
+            $RESULT_256438 = $FAIL
+            $output256438 = $variable55.Value
+        }
+
+        # Row 59
+        # V-256439
+        $variable56 = Get-VMHost | Get-AdvancedSetting -Name Mem.MemEagerZero
+        if ($variable56.Value -eq "1") {
+            $RESULT_256439 = $PASS
+        }
+        else {
+            $RESULT_256439 = $FAIL
+            $output256439 = $variable56.Value
+        }
+
+        # Row 60
+        # V-256440
+        $variable57 = Get-VMHost | Get-AdvancedSetting -Name Config.HostAgent.vmacore.soap.sessionTimeout
+        if ($variable57.Value -eq "30") {
+            $RESULT_256440 = $PASS
+        }
+        else {
+            $RESULT_256440 = $FAIL
+            $output256440 = $variable57.Value
+        }
+
+        # Row 61
+        # V-256441
+        $variable58 = Get-VMHost | Get-AdvancedSetting -Name UserVars.HostClientSessionTimeout
+        if ($variable58.Value -eq "600") {
+            $RESULT_256441 = $PASS
+        }
+        else {
+            $RESULT_256441 = $FAIL
+            $output256441 = $variable58.Value
+        }
+
+        # Row 62
+        # V-256442
+        $variable59 = Get-EsxCli -v2
+        if ($variable59.system.security.fips140.rhttpproxy.get.invoke().Enabled -eq $true) {
+            $RESULT_256442 = $PASS
+        }
+        else {
+            $RESULT_256442 = $FAIL
+            $output256442 = $variable59.system.security.fips140.rhttpproxy.get.invoke().Enabled
+        }
+
+        # Row 63
+        # V-256443
+        $variable60 = Get-VMHost | Get-AdvancedSetting -Name Security.PasswordMaxDays
+        if ($variable60.Value -eq "90") {
+            $RESULT_256443 = $PASS
+        }
+        else {
+            $RESULT_256443 = $FAIL
+            $output256443 = $variable60.Value
+        }
+
+        # Row 64
+        # V-256444
+        $variable61 = Invoke-SSHCommand -SSHSession $SSH -Command "stat -c '%s' /etc/vmware/settings" | Select-Object -ExpandProperty Output
+        if ($variable61 -eq "0") {
+            $RESULT_256444 = $PASS
+        }
+        else {
+            $RESULT_256444 = $FAIL
+            $output256444 = $variable61
+        }
+
+        # Row 65
+        # V-256445
+        $variable62 = Invoke-SSHCommand -SSHSession $SSH -Command "grep '^vmx\.log' /etc/vmware/config" | Select-Object -ExpandProperty Output
+        if ($variable62 -eq "") {
+            $RESULT_256445 = $PASS
+        }
+        else {
+            $RESULT_256445 = $FAIL
+            $output256445 = $variable62
+        }
+
+        # Row 66
+        # V-256446
+        $variable63 = Get-EsxCli -v2
+        if ($variable63.system.settings.encryption.get.invoke().Mode -eq "TPM") {
+            $RESULT_256446 = $PASS
+        }
+        else {
+            $RESULT_256446 = $FAIL
+            $output256446 = $variable63.system.settings.encryption.get.invoke().Mode
+        }
+
+        # Row 67
+        # V-256447
+        $variable64 = Get-EsxCli -v2
+        if ($variable64.system.settings.encryption.get.invoke().RequireSecureBoot -eq $true) {
+            $RESULT_256447 = $PASS
+        }
+        else {
+            $RESULT_256447 = $FAIL
+            $output256447 = $variable64.system.settings.encryption.get.invoke().RequireSecureBoot
+        }
+
+        # Row 68
+        # V-256448
+        $variable65 = Get-VMHost | Get-VMHostService | Where-Object {$_.Label -eq "CIM Server"}
+        if ($variable65.Policy -eq "off") {
+            $RESULT_256448 = $PASS
+        }
+        else {
+            $RESULT_256448 = $FAIL
+            $output256448 = $variable65.Policy
+        }
+
+        # Row 69
+        # V-256449
+        $variable66 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep ciphers" | Select-Object -ExpandProperty Output
+        if ($variable66 -eq "ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr") {
+            $RESULT_256449 = $PASS
+        }
+        else {
+            $RESULT_256449 = $FAIL
+            $output256449 = $variable66
+        }
+
+        # Row 70
+        # V-256387
+        $variable67 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep permitemptypasswords" | Select-Object -ExpandProperty Output
+        if ($variable67 -eq "permitemptypasswords no") {
+            $RESULT_256387 = $PASS
+        }
+        else {
+            $RESULT_256387 = $FAIL
+            $output256387 = $variable67
+        }
+
+        # Row 71
+        # V-256391
+        $variable68 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep gatewayports" | Select-Object -ExpandProperty Output
+        if ($variable68 -eq "gatewayports no") {
+            $RESULT_256391 = $PASS
+        }
+        else {
+            $RESULT_256391 = $FAIL
+            $output256391 = $variable68
+        }
+
+        # Row 72
+        # V-256394
+        $variable69 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep clientalivecountmax" | Select-Object -ExpandProperty Output
+        if ($variable69 -eq "clientalivecountmax 3") {
+            $RESULT_256394 = $PASS
+        }
+        else {
+            $RESULT_256394 = $FAIL
+            $output256394 = $variable69
+        }
+
+        # Row 73
+        # V-256395
+        $variable70 = Invoke-SSHCommand -SSHSession $SSH -Command "/usr/lib/vmware/openssh/bin/sshd -T|grep clientaliveinterval" | Select-Object -ExpandProperty Output
+        if ($variable70 -eq "clientaliveinterval 200") {
+            $RESULT_256395 = $PASS
+        }
+        else {
+            $RESULT_256395 = $FAIL
+            $output256395 = $variable70
+        }
+
+        # Row 74
+        # V-256402
+        $variable71 = Get-VMHost | Get-VMHostAuthentication
+        if ($variable71.Domain -eq "") {
+            $RESULT_256402 = $FAIL
+            $output256402 = $variable71.Domain
+        }
+        else {
+            $RESULT_256402 = $PASS
+        }
+
+        # Row 75
+        # V-256416
+        $variable72 = Get-VMHost | Get-AdvancedSetting -Name Mem.ShareForceSalting
+        if ($variable72.Value -eq "2") {
+            $RESULT_256416 = $PASS
+        }
+        else {
+            $RESULT_256416 = $FAIL
+            $output256416 = $variable72.Value
+        }
+
+        ## Create an empty object
+        $CreateTable = New-Object System.Collections.Generic.List[System.Object]
+
+        ## Add columns
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "CAT#" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Result" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Name" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        ## Create new rows with expected values from variables
+        $row1 = New-Object PSObject
+        $row1 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256410"
+        $row1 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT1
+        $row1 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256410
+        $row1 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi Image Profile and vSphere Installation Bundle (VIB) acceptance levels must be verified."
+        $row1 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256410
+        $row1 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "CommunitySupported"
+        $row1 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row2 = New-Object PSObject
+        $row2 = New-Object PSObject
+        $row2 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256421"
+        $row2 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT1
+        $row2 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256421
+        $row2 | Add-Member -MemberType NoteProperty -Name "Name" -Value "All port groups on standard switches must be configured to reject guest Media Access Control (MAC) address changes."
+        $row2 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value ""
+        $row2 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "'Accept'/'true'"
+        $row2 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row3 = New-Object PSObject
+        $row3 = New-Object PSObject
+        $row3 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256428"
+        $row3 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT1
+        $row3 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row3 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must have all security patches and updates installed."
+        $row3 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value ""
+        $row3 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row3 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "IT/ISSO needs to verify if VMware product is up to date on patches."
+        #$row4 = New-Object PSObject
+        $row4 = New-Object PSObject
+        $row4 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256429"
+        $row4 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT1
+        $row4 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256429"
+        $row4 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must exclusively enable Transport Layer Security (TLS) 1.2 for all endpoints."
+        $row4 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256429
+        $row4 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "tlsv1,tlsv1.1,sslv3"
+        $row4 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Settings can slighty differ, but still PASS"
+        #$row5 = New-Object PSObject
+        $row5 = New-Object PSObject
+        $row5 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256375"
+        $row5 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row5 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256375"
+        $row5 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Access to the ESXi host must be limited by enabling lockdown mode."
+        $row5 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256375
+        $row5 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "Enabled"
+        $row5 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "For environments that do not use vCenter server to manage ESXi, this is not applicable."
+        #$row6 = New-Object PSObject
+        $row6 = New-Object PSObject
+        $row6 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256376"
+        $row6 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row6 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256376"
+        $row6 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must verify the DCUI.Access list."
+        $row6 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256376
+        $row6 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "root"
+        $row6 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "For environments that do not use vCenter server to manage ESXi, this is not applicable."
+        #$row7 = New-Object PSObject
+        $row7 = New-Object PSObject
+        $row7 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256377"
+        $row7 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row7 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256377"
+        $row7 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must verify the exception users list for lockdown mode."
+        $row7 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256377
+        $row7 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row7 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "For environments that do not use vCenter server to manage ESXi, this is not applicable. Also, If the Exception Users list contains accounts that do not require special permissions, this is a finding."
+        #$row8 = New-Object PSObject
+        $row8 = New-Object PSObject
+        $row8 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256378"
+        $row8 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row8 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256378"
+        $row8 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Remote logging for ESXi hosts must be configured."
+        $row8 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value ""
+        $row8 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row8 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "The setting (IP Address) should be a remote logging server to house logs."
+        #$row9 = New-Object PSObject
+        $row9 = New-Object PSObject
+        $row9 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256379"
+        $row9 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row9 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256379"
+        $row9 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enforce the limit of three consecutive invalid logon attempts by a user."
+        $row9 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256379
+        $row9 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "3"
+        $row9 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row10 = New-Object PSObject
+        $row10 = New-Object PSObject
+        $row10 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256380"
+        $row10 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row10 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256380"
+        $row10 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enforce an unlock timeout of 15 minutes after a user account is locked out."
+        $row10 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256380
+        $row10 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "900"
+        $row10 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row11 = New-Object PSObject
+        $row11 = New-Object PSObject
+        $row11 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256381"
+        $row11 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row11 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$MANUAL"
+        $row11 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must display the Standard Mandatory DOD Notice and Consent Banner before granting access to the system via the Direct Console User Interface (DCUI)."
+        $row11 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256381
+        $row11 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row11 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Place the DoD banner message here."
+        #$row12 = New-Object PSObject
+        $row12 = New-Object PSObject
+        $row12 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256382"
+        $row12 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row12 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$MANUAL"
+        $row12 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must display the Standard Mandatory DOD Notice and Consent Banner before granting access to the system via Secure Shell (SSH)."
+        $row12 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256382
+        $row12 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row12 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Place the DoD banner message."
+        #$row13 = New-Object PSObject
+        $row13 = New-Object PSObject
+        $row13 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256383"
+        $row13 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row13 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256383"
+        $row13 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host SSH daemon must be configured with the DOD logon banner."
+        $row13 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256383
+        $row13 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "banner /etc/issue"
+        $row13 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row14 = New-Object PSObject
+        $row14 = New-Object PSObject
+        $row14 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256384"
+        $row14 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row14 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256384"
+        $row14 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must use FIPS 140-2 validated cryptographic modules to protect the confidentiality of remote access sessions."
+        $row14 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256384
+        $row14 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row14 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row15 = New-Object PSObject
+        $row15 = New-Object PSObject
+        $row15 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256385"
+        $row15 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row15 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256385"
+        $row15 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must ignore '.rhosts' files."
+        $row15 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256385
+        $row15 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "ignorerhosts yes"
+        $row15 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row16 = New-Object PSObject
+        $row16 = New-Object PSObject
+        $row16 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256386"
+        $row16 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row16 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256386"
+        $row16 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must not allow host-based authentication."
+        $row16 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256386
+        $row16 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "hostbasedauthentication no"
+        $row16 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row17 = New-Object PSObject
+        $row17 = New-Object PSObject
+        $row17 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256388"
+        $row17 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row17 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256388"
+        $row17 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must not permit user environment settings."
+        $row17 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256388
+        $row17 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "permituserenvironment no"
+        $row17 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row18 = New-Object PSObject
+        $row18 = New-Object PSObject
+        $row18 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256389"
+        $row18 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row18 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256389"
+        $row18 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must perform strict mode checking of home directory configuration files."
+        $row18 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256389
+        $row18 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "strictmodes yes"
+        $row18 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row19 = New-Object PSObject
+        $row19 = New-Object PSObject
+        $row19 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256390"
+        $row19 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row19 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256390"
+        $row19 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must not allow compression or must only allow compression after successful authentication."
+        $row19 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256390
+        $row19 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "compression no"
+        $row19 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row20 = New-Object PSObject
+        $row20 = New-Object PSObject
+        $row20 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256392"
+        $row20 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row20 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256392"
+        $row20 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must be configured to not allow X11 forwarding."
+        $row20 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256392
+        $row20 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "x11forwarding no"
+        $row20 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row21 = New-Object PSObject
+        $row21 = New-Object PSObject
+        $row21 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256393"
+        $row21 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row21 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256393"
+        $row21 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must not permit tunnels."
+        $row21 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256393
+        $row21 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "permittunnel no"
+        $row21 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row22 = New-Object PSObject
+        $row22 = New-Object PSObject
+        $row22 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256396"
+        $row22 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row22 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256396"
+        $row22 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must produce audit records containing information to establish what type of events occurred."
+        $row22 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256396
+        $row22 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "info"
+        $row22 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row23 = New-Object PSObject
+        $row23 = New-Object PSObject
+        $row23 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256397"
+        $row23 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row23 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256397"
+        $row23 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must be configured with a sufficiently complex password policy."
+        $row23 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256397
+        $row23 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "similar=deny retry=3 min=disabled,disabled,disabled,disabled,15"
+        $row23 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row24 = New-Object PSObject
+        $row24 = New-Object PSObject
+        $row24 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256398"
+        $row24 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row24 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256398"
+        $row24 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must prohibit the reuse of passwords within five iterations."
+        $row24 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256398
+        $row24 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "5"
+        $row24 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row25 = New-Object PSObject
+        $row25 = New-Object PSObject
+        $row25 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256399"
+        $row25 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row25 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256399"
+        $row25 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must disable the Managed Object Browser (MOB)."
+        $row25 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256399
+        $row25 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "false"
+        $row25 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row26 = New-Object PSObject
+        $row26 = New-Object PSObject
+        $row26 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256400"
+        $row26 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row26 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256400"
+        $row26 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must be configured to disable nonessential capabilities by disabling Secure Shell (SSH)."
+        $row26 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256400
+        $row26 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "false"
+        $row26 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row27 = New-Object PSObject
+        $row27 = New-Object PSObject
+        $row27 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256401"
+        $row27 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row27 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256401"
+        $row27 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must disable ESXi Shell unless needed for diagnostics or troubleshooting."
+        $row27 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256401
+        $row27 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "false"
+        $row27 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row28 = New-Object PSObject
+        $row28 = New-Object PSObject
+        $row28 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256403"
+        $row28 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row28 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256403"
+        $row28 | Add-Member -MemberType NoteProperty -Name "Name" -Value "ESXi hosts using Host Profiles and/or Auto Deploy must use the vSphere Authentication Proxy to protect passwords when adding themselves to Active Directory."
+        $row28 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256403
+        $row28 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row28 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row29 = New-Object PSObject
+        $row29 = New-Object PSObject
+        $row29 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256404"
+        $row29 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row29 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256404"
+        $row29 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Active Directory ESX Admin group membership must not be used when adding ESXi hosts to Active Directory."
+        $row29 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256404
+        $row29 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row29 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Check Active Directory 'ESX Admins' group to make sure the right users are assigned to it."
+        #$row30 = New-Object PSObject
+        $row30 = New-Object PSObject
+        $row30 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256405"
+        $row30 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row30 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256405"
+        $row30 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must set a timeout to automatically disable idle shell sessions after two minutes."
+        $row30 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256405
+        $row30 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "120"
+        $row30 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row31 = New-Object PSObject
+        $row31 = New-Object PSObject
+        $row31 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256406"
+        $row31 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row31 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256406"
+        $row31 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must terminate shell services after 10 minutes."
+        $row31 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256406
+        $row31 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "600"
+        $row31 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row32 = New-Object PSObject
+        $row32 = New-Object PSObject
+        $row32 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256407"
+        $row32 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row32 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256407"
+        $row32 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must log out of the console UI after two minutes."
+        $row32 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256407
+        $row32 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "120"
+        $row32 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row33 = New-Object PSObject
+        $row33 = New-Object PSObject
+        $row33 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256408"
+        $row33 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row33 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256408"
+        $row33 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enable a persistent log location for all locally stored logs."
+        $row33 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256408
+        $row33 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row33 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Redirect your local ESXi logs to a remote logging server."
+        #$row34 = New-Object PSObject
+        $row34 = New-Object PSObject
+        $row34 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256409"
+        $row34 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row34 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256409"
+        $row34 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must configure NTP time synchronization."
+        $row34 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256409
+        $row34 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row34 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "This should be a valid NTP server on your local network."
+        #$row35 = New-Object PSObject
+        $row35 = New-Object PSObject
+        $row35 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256411"
+        $row35 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row35 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row35 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must protect the confidentiality and integrity of transmitted information by isolating vMotion traffic."
+        $row35 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256411
+        $row35 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row35 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "For environments that do not use vCenter server to manage ESXi, this is not applicable."
+        #$row36 = New-Object PSObject
+        $row36 = New-Object PSObject
+        $row36 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256412"
+        $row36 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row36 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row36 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must protect the confidentiality and integrity of transmitted information by protecting ESXi management traffic."
+        $row36 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256412
+        $row36 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row36 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "If there are any other systems or devices such as VMs on the ESXi management segment, this is a finding."
+        #$row37 = New-Object PSObject
+        $row37 = New-Object PSObject
+        $row37 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256413"
+        $row37 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row37 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row37 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must protect the confidentiality and integrity of transmitted information by isolating IP-based storage traffic."
+        $row37 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256413
+        $row37 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row37 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "If any IP-based storage networks are not isolated from other traffic types, this is a finding."
+        #$row38 = New-Object PSObject
+        $row38 = New-Object PSObject
+        $row38 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256414"
+        $row38 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row38 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256414"
+        $row38 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Simple Network Management Protocol (SNMP) must be configured properly on the ESXi host."
+        $row38 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256414
+        $row38 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row38 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "If SNMP is not in use and is enabled, this is a finding."
+        #$row39 = New-Object PSObject
+        $row39 = New-Object PSObject
+        $row39 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "COME_BACK"
+        $row39 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row39 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256415"
+        $row39 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enable bidirectional Challenge-Handshake Authentication Protocol (CHAP) authentication for Internet Small Computer Systems Interface (iSCSI) traffic."
+        $row39 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256415
+        $row39 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row39 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "If iSCSI is used and CHAP is not set to 'required' for both the target and host, this is a finding."
+        #$row40 = New-Object PSObject
+        $row40 = New-Object PSObject
+        $row40 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256417"
+        $row40 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row40 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row40 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must configure the firewall to restrict access to services running on the host"
+        $row40 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256417
+        $row40 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row40 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "If for an enabled service 'Allow connections from any IP address' is selected, this is a finding."
+        #$row41 = New-Object PSObject
+        $row41 = New-Object PSObject
+        $row41 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256418"
+        $row41 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row41 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$MANUAL;$RESULT_256418"
+        $row41 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must configure the firewall to block network traffic by default."
+        $row41 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256418
+        $row41 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "DROP"
+        $row41 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row42 = New-Object PSObject
+        $row42 = New-Object PSObject
+        $row42 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256419"
+        $row42 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row42 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256419"
+        $row42 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enable Bridge Protocol Data Units (BPDU) filter on the host to prevent being locked out of physical switch ports with Portfast and BPDU Guard enabled."
+        $row42 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256419
+        $row42 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "1"
+        $row42 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row43 = New-Object PSObject
+        $row43 = New-Object PSObject
+        $row43 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256420"
+        $row43 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row43 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256420"
+        $row43 | Add-Member -MemberType NoteProperty -Name "Name" -Value "All port groups on standard switches must be configured to reject forged transmits."
+        $row43 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256420
+        $row43 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "Reject"
+        $row43 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row44 = New-Object PSObject
+        $row44 = New-Object PSObject
+        $row44 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256422"
+        $row44 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row44 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256422"
+        $row44 | Add-Member -MemberType NoteProperty -Name "Name" -Value "All port groups on standard switches must be configured to reject guest promiscuous mode requests."
+        $row44 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256422
+        $row44 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "Reject"
+        $row44 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row45 = New-Object PSObject
+        $row45 = New-Object PSObject
+        $row45 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256423"
+        $row45 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row45 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256423"
+        $row45 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Use of the dvFilter network application programming interfaces (APIs) must be restricted."
+        $row45 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256423
+        $row45 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row45 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Verify the value is blank or the correct IP address of a security appliance if in use."
+        #$row46 = New-Object PSObject
+        $row46 = New-Object PSObject
+        $row46 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256424"
+        $row46 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row46 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$MANUAL;$RESULT_256424"
+        $row46 | Add-Member -MemberType NoteProperty -Name "Name" -Value "All port groups on standard switches must be configured to a value other than that of the native virtual local area network (VLAN)."
+        $row46 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256424
+        $row46 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row46 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "If any port group is configured with the native VLAN of the attached physical switch, this is a finding. Cisco switch contain VLAN 1 as a native VLAN."
+        #$row47 = New-Object PSObject
+        $row47 = New-Object PSObject
+        $row47 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256425"
+        $row47 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row47 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$MANUAL;$RESULT_256425"
+        $row47 | Add-Member -MemberType NoteProperty -Name "Name" -Value "All port groups on standard switches must not be configured to virtual local area network (VLAN) 4095 unless Virtual Guest Tagging (VGT) is required."
+        $row47 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256425
+        $row47 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row47 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "For each standard switch, review the 'VLAN ID' on each port group and verify it is not set to '4095'."
+        #$row48 = New-Object PSObject
+        $row48 = New-Object PSObject
+        $row48 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256426"
+        $row48 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row48 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row48 | Add-Member -MemberType NoteProperty -Name "Name" -Value "All port groups on standard switches must not be configured to virtual local area network (VLAN) values reserved by upstream physical switches."
+        $row48 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256426
+        $row48 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row48 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "For each standard switch, review the 'VLAN ID' on each port group and verify it is not set to a reserved VLAN ID."
+        #$row49 = New-Object PSObject
+        $row49 = New-Object PSObject
+        $row49 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256427"
+        $row49 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row49 | Add-Member -MemberType NoteProperty -Name "Result" -Value $NA
+        $row49 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must not provide root/administrator-level access to Common Information Model (CIM)-based hardware monitoring tools or other third-party applications."
+        $row49 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256427
+        $row49 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row49 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Verify if other third-party applications are not using root/administrator-level access to VMware products."
+        #$row50 = New-Object PSObject
+        $row50 = New-Object PSObject
+        $row50 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256430"
+        $row50 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row50 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256430"
+        $row50 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enable Secure Boot."
+        $row50 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256430
+        $row50 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "Enabled"
+        $row50 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row51 = New-Object PSObject
+        $row51 = New-Object PSObject
+        $row51 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256431"
+        $row51 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row51 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row51 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must use DOD-approved certificates."
+        $row51 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256431
+        $row51 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row51 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Air-gap systems are not required to have DoD certs since it is not connected to the internet in any form."
+        #$row52 = New-Object PSObject
+        $row52 = New-Object PSObject
+        $row52 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256432"
+        $row52 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row52 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256432"
+        $row52 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must not suppress warnings that the local or remote shell sessions are enabled."
+        $row52 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256432
+        $row52 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "0"
+        $row52 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row53 = New-Object PSObject
+        $row53 = New-Object PSObject
+        $row53 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256433"
+        $row53 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row53 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256433"
+        $row53 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must not suppress warnings about unmitigated hyperthreading vulnerabilities."
+        $row53 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256433
+        $row53 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "0"
+        $row53 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row54 = New-Object PSObject
+        $row54 = New-Object PSObject
+        $row54 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256434"
+        $row54 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row54 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256434"
+        $row54 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must disable port forwarding."
+        $row54 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256434
+        $row54 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "allowtcpforwarding no"
+        $row54 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row55 = New-Object PSObject
+        $row55 = New-Object PSObject
+        $row55 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256435"
+        $row55 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row55 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$MANUAL;$RESULT_256435"
+        $row55 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host OpenSLP service must be disabled."
+        $row55 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256435
+        $row55 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "off"
+        $row55 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row56 = New-Object PSObject
+        $row56 = New-Object PSObject
+        $row56 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256436"
+        $row56 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row56 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256436"
+        $row56 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enable audit logging."
+        $row56 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256436
+        $row56 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row56 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "If audit record storage is not active and configured, this is a finding."
+        #$row57 = New-Object PSObject
+        $row57 = New-Object PSObject
+        $row57 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256437"
+        $row57 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row57 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256437"
+        $row57 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enable strict x509 verification for SSL syslog endpoints."
+        $row57 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256437
+        $row57 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row57 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row58 = New-Object PSObject
+        $row58 = New-Object PSObject
+        $row58 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256438"
+        $row58 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row58 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256438"
+        $row58 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must verify certificates for SSL syslog endpoints."
+        $row58 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256438
+        $row58 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row58 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row59 = New-Object PSObject
+        $row59 = New-Object PSObject
+        $row59 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256439"
+        $row59 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row59 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256439"
+        $row59 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must enable volatile key destruction."
+        $row59 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256439
+        $row59 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "1"
+        $row59 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row60 = New-Object PSObject
+        $row60 = New-Object PSObject
+        $row60 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256440"
+        $row60 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row60 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256440"
+        $row60 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must configure a session timeout for the vSphere API."
+        $row60 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256440
+        $row60 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "30"
+        $row60 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row61 = New-Object PSObject
+        $row61 = New-Object PSObject
+        $row61 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256441"
+        $row61 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row61 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256441"
+        $row61 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi Host Client must be configured with a session timeout."
+        $row61 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256441
+        $row61 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "600"
+        $row61 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row62 = New-Object PSObject
+        $row62 = New-Object PSObject
+        $row62 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256442"
+        $row62 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row62 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256442"
+        $row62 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host rhttpproxy daemon must use FIPS 140-2 validated cryptographic modules to protect the confidentiality of remote access sessions."
+        $row62 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256442
+        $row62 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row62 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row63 = New-Object PSObject
+        $row63 = New-Object PSObject
+        $row63 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256443"
+        $row63 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row63 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256443"
+        $row63 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must be configured with an appropriate maximum password age."
+        $row63 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256443
+        $row63 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "90"
+        $row63 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row64 = New-Object PSObject
+        $row64 = New-Object PSObject
+        $row64 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256444"
+        $row64 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row64 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256444"
+        $row64 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must not be configured to override virtual machine (VM) configurations."
+        $row64 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256444
+        $row64 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "0"
+        $row64 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row65 = New-Object PSObject
+        $row65 = New-Object PSObject
+        $row65 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256445"
+        $row65 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row65 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256445"
+        $row65 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must not be configured to override virtual machine (VM) logger settings."
+        $row65 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256445
+        $row65 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row65 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "The expected setting is blank or nothing to pass."
+        #$row66 = New-Object PSObject
+        $row66 = New-Object PSObject
+        $row66 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256446"
+        $row66 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row66 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256446"
+        $row66 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must require TPM-based configuration encryption."
+        $row66 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256446
+        $row66 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "TPM"
+        $row66 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row67 = New-Object PSObject
+        $row67 = New-Object PSObject
+        $row67 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256447"
+        $row67 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row67 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256447"
+        $row67 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must implement Secure Boot enforcement."
+        $row67 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256447
+        $row67 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row67 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row68 = New-Object PSObject
+        $row68 = New-Object PSObject
+        $row68 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256448"
+        $row68 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row68 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256448"
+        $row68 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi Common Information Model (CIM) service must be disabled."
+        $row68 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256448
+        $row68 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "off"
+        $row68 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row69 = New-Object PSObject
+        $row69 = New-Object PSObject
+        $row69 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256449"
+        $row69 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row69 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256449"
+        $row69 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host SSH daemon must be configured to only use FIPS 140-2 validated ciphers."
+        $row69 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256449
+        $row69 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
+        $row69 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Your settings might differ, and could pass. Check and verify."
+        #$row70 = New-Object PSObject
+        $row70 = New-Object PSObject
+        $row70 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256387"
+        $row70 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row70 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256387"
+        $row70 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must not allow authentication using an empty password."
+        $row70 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256387
+        $row70 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "permitemptypasswords no"
+        $row70 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row71 = New-Object PSObject
+        $row71 = New-Object PSObject
+        $row71 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256391"
+        $row71 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row71 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256391"
+        $row71 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must be configured to not allow gateway ports."
+        $row71 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256391
+        $row71 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "gatewayports no"
+        $row71 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row72 = New-Object PSObject
+        $row72 = New-Object PSObject
+        $row72 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256394"
+        $row72 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row72 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256394"
+        $row72 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must set a timeout count on idle sessions."
+        $row72 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256394
+        $row72 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "clientalivecountmax 3"
+        $row72 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row73 = New-Object PSObject
+        $row73 = New-Object PSObject
+        $row73 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256395"
+        $row73 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row73 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256395"
+        $row73 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host Secure Shell (SSH) daemon must set a timeout interval on idle sessions."
+        $row73 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256395
+        $row73 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "clientaliveinterval 200"
+        $row73 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row74 = New-Object PSObject
+        $row74 = New-Object PSObject
+        $row74 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256402"
+        $row74 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row74 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256402"
+        $row74 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must use Active Directory for local user authentication."
+        $row74 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256402
+        $row74 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row74 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "For systems that do not use Active Directory and have no local user accounts other than root and/or service accounts, this is not applicable."
+        #$row75 = New-Object PSObject
+        $row75 = New-Object PSObject
+        $row75 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256416"
+        $row75 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row75 | Add-Member -MemberType NoteProperty -Name "Result" -Value "$RESULT_256416"
+        $row75 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The ESXi host must disable Inter-Virtual Machine (VM) Transparent Page Sharing"
+        $row75 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256416
+        $row75 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "2"
+        $row75 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        ## Add rows to the object
+        $CreateTable.Add($row1) | Out-Null
+        $CreateTable.Add($row2) | Out-Null
+        $CreateTable.Add($row3) | Out-Null
+        $CreateTable.Add($row4) | Out-Null
+        $CreateTable.Add($row5) | Out-Null
+        $CreateTable.Add($row6) | Out-Null
+        $CreateTable.Add($row7) | Out-Null
+        $CreateTable.Add($row8) | Out-Null
+        $CreateTable.Add($row9) | Out-Null
+        $CreateTable.Add($row10) | Out-Null
+        $CreateTable.Add($row11) | Out-Null
+        $CreateTable.Add($row12) | Out-Null
+        $CreateTable.Add($row13) | Out-Null
+        $CreateTable.Add($row14) | Out-Null
+        $CreateTable.Add($row15) | Out-Null
+        $CreateTable.Add($row16) | Out-Null
+        $CreateTable.Add($row17) | Out-Null
+        $CreateTable.Add($row18) | Out-Null
+        $CreateTable.Add($row19) | Out-Null
+        $CreateTable.Add($row20) | Out-Null
+        $CreateTable.Add($row21) | Out-Null
+        $CreateTable.Add($row22) | Out-Null
+        $CreateTable.Add($row23) | Out-Null
+        $CreateTable.Add($row24) | Out-Null
+        $CreateTable.Add($row25) | Out-Null
+        $CreateTable.Add($row26) | Out-Null
+        $CreateTable.Add($row27) | Out-Null
+        $CreateTable.Add($row28) | Out-Null
+        $CreateTable.Add($row29) | Out-Null
+        $CreateTable.Add($row30) | Out-Null
+        $CreateTable.Add($row31) | Out-Null
+        $CreateTable.Add($row32) | Out-Null
+        $CreateTable.Add($row33) | Out-Null
+        $CreateTable.Add($row34) | Out-Null
+        $CreateTable.Add($row35) | Out-Null
+        $CreateTable.Add($row36) | Out-Null
+        $CreateTable.Add($row37) | Out-Null
+        $CreateTable.Add($row38) | Out-Null
+        $CreateTable.Add($row39) | Out-Null
+        $CreateTable.Add($row40) | Out-Null
+        $CreateTable.Add($row41) | Out-Null
+        $CreateTable.Add($row42) | Out-Null
+        $CreateTable.Add($row43) | Out-Null
+        $CreateTable.Add($row44) | Out-Null
+        $CreateTable.Add($row45) | Out-Null
+        $CreateTable.Add($row46) | Out-Null
+        $CreateTable.Add($row47) | Out-Null
+        $CreateTable.Add($row48) | Out-Null
+        $CreateTable.Add($row49) | Out-Null
+        $CreateTable.Add($row50) | Out-Null
+        $CreateTable.Add($row51) | Out-Null
+        $CreateTable.Add($row52) | Out-Null
+        $CreateTable.Add($row53) | Out-Null
+        $CreateTable.Add($row54) | Out-Null
+        $CreateTable.Add($row55) | Out-Null
+        $CreateTable.Add($row56) | Out-Null
+        $CreateTable.Add($row57) | Out-Null
+        $CreateTable.Add($row58) | Out-Null
+        $CreateTable.Add($row59) | Out-Null
+        $CreateTable.Add($row60) | Out-Null
+        $CreateTable.Add($row61) | Out-Null
+        $CreateTable.Add($row62) | Out-Null
+        $CreateTable.Add($row63) | Out-Null
+        $CreateTable.Add($row64) | Out-Null
+        $CreateTable.Add($row65) | Out-Null
+        $CreateTable.Add($row66) | Out-Null
+        $CreateTable.Add($row67) | Out-Null
+        $CreateTable.Add($row68) | Out-Null
+        $CreateTable.Add($row69) | Out-Null
+        $CreateTable.Add($row70) | Out-Null
+        $CreateTable.Add($row71) | Out-Null
+        $CreateTable.Add($row72) | Out-Null
+        $CreateTable.Add($row73) | Out-Null
+        $CreateTable.Add($row74) | Out-Null
+        $CreateTable.Add($row75) | Out-Null
+
+        # Export?
+        ## Ask the user if they want to export the data
+        $ExportPrompt = Read-Host "Do you want to export the data to an Excel CSV file? (Y/N)"
+        $ExportPrompt = $ExportPrompt.ToLower()
+
+            if ($ExportPrompt -eq "yes" -or $ExportPrompt -eq "y") {
+                ## Export the data to a CSV file
+                $CreateTable | Export-Csv -Path "$ScriptDir\ESXi_results.csv" -NoTypeInformation
+                $CreateTable | Out-GridView
+            }
+            else {
+                # Display the data without exporting
+                $CreateTable | Out-GridView
+            }
+        Write-Host ""
+        Read-Host "Please press 'enter' to return to the menu"
+}
+    "2" = {
+        Clear-host
+        Write-Host ""
+        Write-Host "DoD DISA STIG Benchmark vSphere 7.0 VM STIG V1R1"
+        Write-Host "================================================"
+        Write-Host ""
+        Write-Host "!NOTICE!: To properly check STIG settings on Virtual 
+Machine they MUST be powered on. This will only check 
+powered on VM's."
+        Write-Host ""
+        Read-Host "Please press 'enter' to continue..."
+        Write-Host ""
+        
+        # Get VM's
+        $vms = Get-VM
+
+        # Create an empty array list to store the VM names
+        $vmNames = New-Object System.Collections.ArrayList
+
+        # Loop through the VMs and add the VM names to the array list
+        foreach ($vm in $vms) {
+            if ($vm.PowerState -eq 'PoweredOn') {
+                $vmNames.Add($vm.Name) | Out-Null
+            }
+        }
+
+        # Row1
+        # V-256453
+        foreach ($name in $vmNames) {
+            $variable1 = Get-VM "$name" | Get-AdvancedSetting -Name isolation.tools.diskShrink.disable
+            if ($variable1 -eq '') {
+                $RESULT_256453 = $FAIL
+                $output_256453 = $variable1
+            }
+            else {
+                $RESULT_256453 = $PASS
+            }
+        }
+
+        # Row2
+        # V-256454
+        foreach ($name in $vmNames) {
+            $variable2 = Get-VM "$name" | Get-AdvancedSetting -Name isolation.tools.diskWiper.disable
+            if ($variable2 -eq '') {
+                $RESULT_256454 = $FAIL
+                $output_256454 = $variable2
+            }
+            else {
+                $RESULT_256454 = $PASS
+            }
+        }
+
+        # Row3
+        # V-256455
+        foreach ($name in $vmNames) {
+            $variable3 = Get-VM "$name" | Get-HardDisk | Select-object Parent, Name, Filename, DiskType, Persistence
+            if ($variable3.Persistence -eq 'persistent') {
+                $RESULT_256455 = $PASS
+            }
+            else {
+                $RESULT_256455 = $FAIL
+                $output_256455 = $variable3.Persistence
+            }
+        }
+
+        # Row4
+        # V-256456
+        foreach ($name in $vmNames) {
+            $variable4 = Get-VM "$name" | Get-AdvancedSetting -Name isolation.tools.hgfsServerSet.disable
+            if ($variable4 -eq '') {
+                $RESULT_256456 = $FAIL
+                $output_256456 = $variable4
+            }
+            else {
+                $RESULT_256456 = $PASS
+            }
+        }
+
+        # Row5
+        # V-256457
+        $variable5 = Get-VM | Get-FloppyDrive | Select Parent, Name, ConnectionState
+        if ($variable5.ConnectionState -eq '') {
+            $RESULT_256457 = $PASS
+        }
+        else {
+            $RESULT_ = $FAIL
+            $output256457 = $variable5.ConnectionState
+        }
+
+        # Row6
+        # V-256459
+        $variable6 = Get-VM | Where {$_.ExtensionData.Config.Hardware.Device.DeviceInfo.Label -match "parallel"}
+        if ($variable6 -eq '') {
+            $RESULT_256459 = $PASS
+        }
+        else {
+            $RESULT_256459 = $FAIL
+            $output256459 = $variable6
+        }
+
+        # Row7
+        # V-2564560
+        $variable7 = Get-VM | Where {$_.ExtensionData.Config.Hardware.Device.DeviceInfo.Label -match "serial"}
+        if ($variable7 -eq '') {
+            $RESULT_256460 = $PASS
+        }
+        else {
+            $RESULT_256460 = $FAIL
+            $output256460 = $variable7
+        }
+
+        # Row8
+        # V-2564561
+        $variable8 = Get-VM | Where {$_.ExtensionData.Config.Hardware.Device.DeviceInfo.Label -match "usb"}
+        if ($variable8.Name -eq '') {
+            $RESULT_256461 = $PASS
+        }
+        else {
+            $RESULT_256461 = $FAIL
+            $output256461 = $variable8.Name
+        }
+
+        # Row9
+        # V-256462
+        foreach ($name in $vmNames) {
+            $variable9 = Get-VM "$name" | Get-AdvancedSetting -Name RemoteDisplay.maxConnections
+            if ($variable9.Value -eq '1') {
+                $RESULT_256462 = $PASS
+            }
+            else {
+                $RESULT_256462 = $FAIL
+                $output_256462 = $variable9.Value
+            }
+        }
+
+        # Row10
+        # V-256464
+        foreach ($name in $vmNames) {
+            $variable10 = Get-VM "$name" | Get-AdvancedSetting -Name isolation.device.connectable.disable
+            if ($variable10 -eq '') {
+                $RESULT_256464 = $FAIL
+                $output_256464 = $variable10
+            }
+            else {
+                $RESULT_256464 = $PASS
+            }
+        }
+
+        # Row11
+        # V-256465
+        foreach ($name in $vmNames) {
+            $variable11 = Get-VM "$name" | Get-AdvancedSetting -Name tools.guestlib.enableHostInfo
+            if ($variable11 -eq '') {
+                $RESULT_256465 = $FAIL
+                $output_256465 = $variable11
+            }
+            else {
+                $RESULT_256465 = $PASS
+            }
+        }
+
+        # Row12
+        # V-256469 (Manual Check)
+
+        # Row13
+        # V-256470
+        foreach ($name in $vmNames) {
+            $variable12 = Get-VM "$name" | Get-AdvancedSetting -Name tools.guest.desktop.autolock
+            if ($variable12 -eq 'false') {
+                $RESULT_256470 = $FAIL
+                $output_256470 = $variable12
+            }
+            else {
+                $RESULT_256470 = $PASS
+            }
+        }
+
+        # Row14
+        # V-256472 (Manual Check)
+
+        # Row15
+        # V-256473
+        foreach ($name in $vmNames) {
+            $variable13 = Get-VM | Where {$_.ExtensionData.Config.Flags.EnableLogging -ne "True"}
+            if ($variable13 -eq '') {
+                $RESULT_256473 = $FAIL
+                $output_256473 = $variable13
+            }
+            else {
+                $RESULT_256473 = $PASS
+            }
+        }
+
+        # Row16
+        # V-256474
+        foreach ($name in $vmNames) {
+            $variable14 = Get-VM "$name" | Get-AdvancedSetting -Name log.rotateSize
+            if ($variable14 -eq '') {
+                $RESULT_256474 = $FAIL
+                $output_256474 = $variable14
+            }
+            else {
+                $RESULT_256474 = $PASS
+            }
+        }
+
+        # Row17
+        # V-256475
+        foreach ($name in $vmNames) {
+            $variable15 = Get-VM "$name" | Get-AdvancedSetting -Name log.keepOld
+            if ($variable15 -eq '') {
+                $RESULT_256475 = $FAIL
+                $output_256475 = $variable15
+            }
+            else {
+                $RESULT_256475 = $PASS
+            }
+        }
+
+        # Row18
+        # V-256476
+        foreach ($name in $vmNames) {
+            $variable15 = Get-VM "$name" | Get-AdvancedSetting -Name "pciPassthru*.present" | Select Entity, Name, Value
+            if ($variable16.Value -eq '') {
+                $RESULT_256476 = $PASS
+            }
+            else {
+                $RESULT_256476 = $FAIL
+                $output_256476 = $variable16.Value
+            }
+        }
+
+        # Row19
+        # V-256477
+        $variable16 = Get-VM | Where {($_.ExtensionData.Config.FtEncryptionMode -ne "ftEncryptionOpportunistic") -and ($_.ExtensionData.Config.FtEncryptionMode -ne "ftEncryptionRequired")}
+        if ($variable17 -eq '') {
+            $RESULT_256477 = $FAIL
+            $output256477 = $variable17
+        }
+        else {
+            $RESULT_25677 = $PASS
+        }
+
+        # Row20
+        # V-256450
+        foreach ($name in $vmNames) {
+            $variable18 = Get-VM "$name" | Get-AdvancedSetting -Name isolation.tools.copy.disable
+            if ($variable18 -eq $true) {
+                $RESULT_256450 = $PASS
+            }
+            else {
+                $RESULT_256450 = $FAIL
+                $output_256450 = $variable18
+            }
+        }
+
+        # Row21
+        # V-256451
+        foreach ($name in $vmNames) {
+            $variable19 = Get-VM "$name" | Get-AdvancedSetting -Name isolation.tools.dnd.disable
+            if ($variable19 -eq $true) {
+                $RESULT_256451 = $PASS
+            }
+            else {
+                $RESULT_256451 = $FAIL
+                $output_256451 = $variable19
+            }
+        }
+
+        # Row22
+        # V-256452
+        foreach ($name in $vmNames) {
+            $variable20 = Get-VM "$name" | Get-AdvancedSetting -Name isolation.tools.paste.disable
+            if ($variable20 -eq $true) {
+                $RESULT_256452 = $PASS
+            }
+            else {
+                $RESULT_256452 = $FAIL
+                $output_256452 = $variable20
+            }
+        }
+
+        # Row23
+        # V-256458
+        foreach ($name in $vmNames) {
+            $variable21 = Get-VM "$name"| Get-CDDrive | Where {$_.extensiondata.connectable.connected -eq $true} | Select-Object Name
+            if ($variable21 -eq "CD/DVD drive 1" -or $variable21 -eq "CD/DVD drive 2" ) {
+                $RESULT_256458 = $FAIL
+                $output_256458 = $variable21
+            }
+            else {
+                $RESULT_256458 = $PASS
+            }
+        }
+
+        # Row24
+        # V-256463
+        foreach ($name in $vmNames) {
+            $variable22 = Get-VM "$name" | Get-AdvancedSetting -Name tools.setinfo.sizeLimit
+            if ($variable22 -eq '1048576') {
+                $RESULT_256463 = $PASS
+            }
+            else {
+                $RESULT_256463 = $FAIL
+                $output_256463 = $variable22
+            }
+        }
+
+        # Row25
+        # V-256466
+        foreach ($name in $vmNames) {
+            $variable23 = Get-VM "$name" | Get-AdvancedSetting -Name sched.mem.pshare.salt
+            if ($variable23 -eq $true) {
+                $RESULT_256466 = $FAIL
+                $output_256466 = $variable23
+            }
+            else {
+                $RESULT_256466 = $FAIL
+            }
+        }
+
+        # Row26
+        # V-256467 (Manual Check)
+
+        # Row27
+        # V-256468 (Manual Check)
+
+        # Row28
+        # V-256471
+        $variable24 = Get-VM "$name" | Get-AdvancedSetting -Name mks.enable3d 
+        if ($variable24 -eq $false) {
+            $RESULT_256471 = $PASS
+        }
+        else {
+            $RESULT_256471 = $FAIL
+            $output256471 = $variable24
+        }
+
+        ## Create an empty object
+        $CreateTable = New-Object System.Collections.Generic.List[System.Object]
+
+        ## Add columns
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "CAT#" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Result" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Name" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $CreateTable | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        ## Create new rows with expected values from variables
+        $row1 = New-Object PSObject
+        $row1 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256453"
+        $row1 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row1 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256453
+        $row1 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Virtual disk shrinking must be disabled on the virtual machine (VM)."
+        $row1 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256453
+        $row1 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row1 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row2 = New-Object PSObject
+        $row2 = New-Object PSObject
+        $row2 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256454"
+        $row2 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row2 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256454
+        $row2 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Virtual disk wiping must be disabled on the virtual machine (VM)."
+        $row2 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256454
+        $row2 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row2 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row3 = New-Object PSObject
+        $row3 = New-Object PSObject
+        $row3 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256455"
+        $row3 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row3 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256455
+        $row3 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Independent, nonpersistent disks must not be used on the virtual machine (VM)."
+        $row3 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256455
+        $row3 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row3 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Check to see if disk storage on VM's are accounted for and are 'Persistent'."
+        #$row4 = New-Object PSObject
+        $row4 = New-Object PSObject
+        $row4 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256456"
+        $row4 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row4 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256456
+        $row4 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Host Guest File System (HGFS) file transfers must be disabled on the virtual machine (VM)."
+        $row4 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256456
+        $row4 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row4 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row5 = New-Object PSObject
+        $row5 = New-Object PSObject
+        $row5 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256457"
+        $row5 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row5 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row5 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Unauthorized floppy devices must be disconnected on the virtual machine (VM)."
+        $row5 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256457
+        $row5 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row5 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Ensure no VM's are using floppy drives."
+        #$row6 = New-Object PSObject
+        $row6 = New-Object PSObject
+        $row6 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256459"
+        $row6 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row6 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256459
+        $row6 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Unauthorized parallel devices must be disconnected on the virtual machine (VM)."
+        $row6 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256459
+        $row6 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row6 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row7 = New-Object PSObject
+        $row7 = New-Object PSObject
+        $row7 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256460"
+        $row7 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row7 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256460
+        $row7 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Unauthorized serial devices must be disconnected on the virtual machine (VM)."
+        $row7 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256460
+        $row7 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row7 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row8 = New-Object PSObject
+        $row8 = New-Object PSObject
+        $row8 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256461"
+        $row8 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row8 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256461
+        $row8 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Unauthorized USB devices must be disconnected on the virtual machine (VM)."
+        $row8 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256461
+        $row8 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row8 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Depending on the ISSO, you may or may not be allowed to attach USB devices to ESXi/vSphere."
+        #$row9 = New-Object PSObject
+        $row9 = New-Object PSObject
+        $row9 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256462"
+        $row9 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row9 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256462
+        $row9 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Console connection sharing must be limited on the virtual machine (VM)."
+        $row9 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256462
+        $row9 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "1"
+        $row9 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row10 = New-Object PSObject
+        $row10 = New-Object PSObject
+        $row10 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256464"
+        $row10 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row10 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256464
+        $row10 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Unauthorized removal, connection, and modification of devices must be prevented on the virtual machine (VM)."
+        $row10 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256464
+        $row10 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row10 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row11 = New-Object PSObject
+        $row11 = New-Object PSObject
+        $row11 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256465"
+        $row11 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row11 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256465
+        $row11 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The virtual machine (VM) must not be able to obtain host information from the hypervisor."
+        $row11 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256465
+        $row11 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "false"
+        $row11 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row12 = New-Object PSObject
+        $row12 = New-Object PSObject
+        $row12 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256469"
+        $row12 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row12 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row12 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Use of the virtual machine (VM) console must be minimized."
+        $row12 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256469
+        $row12 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row12 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Results may vary, this find will prevent system admins to use the web console of a VM. Consult with your ISSO."
+        #$row13 = New-Object PSObject
+        $row13 = New-Object PSObject
+        $row13 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256470"
+        $row13 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row13 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256470
+        $row13 | Add-Member -MemberType NoteProperty -Name "Name" -Value "The virtual machine (VM) guest operating system must be locked when the last console connection is closed."
+        $row13 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256470
+        $row13 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row13 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row14 = New-Object PSObject
+        $row14 = New-Object PSObject
+        $row14 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256472"
+        $row14 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row14 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row14 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Encryption must be enabled for vMotion on the virtual machine (VM)."
+        $row14 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256472
+        $row14 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row14 | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Not applicable, only applies if you have vMotion."
+        #$row15 = New-Object PSObject
+        $row15 = New-Object PSObject
+        $row15 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256473"
+        $row15 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row15 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256473
+        $row15 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Logging must be enabled on the virtual machine (VM)."
+        $row15 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256473
+        $row15 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row15 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row16 = New-Object PSObject
+        $row16 = New-Object PSObject
+        $row16 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256474"
+        $row16 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row16 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256474
+        $row16 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Log size must be configured properly on the virtual machine (VM)."
+        $row16 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256474
+        $row16 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "2048000"
+        $row16 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row17 = New-Object PSObject
+        $row17 = New-Object PSObject
+        $row17 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256475"
+        $row17 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row17 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256475
+        $row17 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Log retention must be configured properly on the virtual machine (VM)."
+        $row17 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256475
+        $row17 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row17 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row18 = New-Object PSObject
+        $row18 = New-Object PSObject
+        $row18 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256476"
+        $row18 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row18 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256476
+        $row18 | Add-Member -MemberType NoteProperty -Name "Name" -Value "DirectPath I/O must be disabled on the virtual machine (VM) when not required."
+        $row18 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256476
+        $row18 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row18 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row19 = New-Object PSObject
+        $row19 = New-Object PSObject
+        $row19 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256477"
+        $row19 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT2
+        $row19 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row19 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Encryption must be enabled for Fault Tolerance on the virtual machine (VM)."
+        $row19 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256477
+        $row19 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row19 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row20 = New-Object PSObject
+        $row20 = New-Object PSObject
+        $row20 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256450"
+        $row20 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row20 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256450
+        $row20 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Copy operations must be disabled on the virtual machine (VM)."
+        $row20 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256450
+        $row20 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row20 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row21 = New-Object PSObject
+        $row21 = New-Object PSObject
+        $row21 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256451"
+        $row21 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row21 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256451
+        $row21 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Drag and drop operations must be disabled on the virtual machine (VM)."
+        $row21 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output
+        $row21 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row21 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row22 = New-Object PSObject
+        $row22 = New-Object PSObject
+        $row22 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256452"
+        $row22 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row22 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256452
+        $row22 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Paste operations must be disabled on the virtual machine (VM)."
+        $row22 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256452
+        $row22 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row22 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row23 = New-Object PSObject
+        $row23 = New-Object PSObject
+        $row23 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256458"
+        $row23 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row23 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256458
+        $row23 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Unauthorized CD/DVD devices must be disconnected on the virtual machine (VM)."
+        $row23 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256485
+        $row23 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row23 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row24 = New-Object PSObject
+        $row24 = New-Object PSObject
+        $row24 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256463"
+        $row24 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row24 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256463
+        $row24 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Informational messages from the virtual machine to the VMX file must be limited on the virtual machine (VM)."
+        $row24 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256463
+        $row24 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "1048576"
+        $row24 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row25 = New-Object PSObject
+        $row25 = New-Object PSObject
+        $row25 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256466"
+        $row25 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row25 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256466
+        $row25 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Shared salt values must be disabled on the virtual machine (VM)."
+        $row25 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256466
+        $row25 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "true"
+        $row25 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row26 = New-Object PSObject
+        $row26 = New-Object PSObject
+        $row26 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256467"
+        $row26 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row26 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row26 | Add-Member -MemberType NoteProperty -Name "Name" -Value "Access to virtual machines (VMs) through the 'dvfilter' network Application Programming Interface (API) must be controlled."
+        $row26 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256467
+        $row26 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row26 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row27 = New-Object PSObject
+        $row27 = New-Object PSObject
+        $row27 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256468"
+        $row27 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row27 | Add-Member -MemberType NoteProperty -Name "Result" -Value $MANUAL
+        $row27 | Add-Member -MemberType NoteProperty -Name "Name" -Value "System administrators must use templates to deploy virtual machines (VMs) whenever possible."
+        $row27 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256468
+        $row27 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value ""
+        $row27 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        #$row28 = New-Object PSObject
+        $row28 = New-Object PSObject
+        $row28 | Add-Member -MemberType NoteProperty -Name "Vul ID" -Value "V-256471"
+        $row28 | Add-Member -MemberType NoteProperty -Name "CAT#" -Value $CAT3
+        $row28 | Add-Member -MemberType NoteProperty -Name "Result" -Value $RESULT_256471
+        $row28 | Add-Member -MemberType NoteProperty -Name "Name" -Value "All 3D features on the virtual machine (VM) must be disabled when not required."
+        $row28 | Add-Member -MemberType NoteProperty -Name "Current Setting" -Value $output256471
+        $row28 | Add-Member -MemberType NoteProperty -Name "Expected Setting" -Value "false"
+        $row28 | Add-Member -MemberType NoteProperty -Name "Comment" -Value ""
+        ## Add rows to the object
+        $CreateTable.Add($row1) | Out-Null
+        $CreateTable.Add($row2) | Out-Null
+        $CreateTable.Add($row3) | Out-Null
+        $CreateTable.Add($row4) | Out-Null
+        $CreateTable.Add($row5) | Out-Null
+        $CreateTable.Add($row6) | Out-Null
+        $CreateTable.Add($row7) | Out-Null
+        $CreateTable.Add($row8) | Out-Null
+        $CreateTable.Add($row9) | Out-Null
+        $CreateTable.Add($row10) | Out-Null
+        $CreateTable.Add($row11) | Out-Null
+        $CreateTable.Add($row12) | Out-Null
+        $CreateTable.Add($row13) | Out-Null
+        $CreateTable.Add($row14) | Out-Null
+        $CreateTable.Add($row15) | Out-Null
+        $CreateTable.Add($row16) | Out-Null
+        $CreateTable.Add($row17) | Out-Null
+        $CreateTable.Add($row18) | Out-Null
+        $CreateTable.Add($row19) | Out-Null
+        $CreateTable.Add($row20) | Out-Null
+        $CreateTable.Add($row21) | Out-Null
+        $CreateTable.Add($row22) | Out-Null
+        $CreateTable.Add($row23) | Out-Null
+        $CreateTable.Add($row24) | Out-Null
+        $CreateTable.Add($row25) | Out-Null
+        $CreateTable.Add($row26) | Out-Null
+        $CreateTable.Add($row27) | Out-Null
+        $CreateTable.Add($row28) | Out-Null
+        # Export?
+        ## Ask the user if they want to export the data
+        $ExportPrompt = Read-Host "Do you want to export the data to an Excel CSV file? (Y/N)"
+        $ExportPrompt = $ExportPrompt.ToLower()
+
+            if ($ExportPrompt -eq "yes" -or $ExportPrompt -eq "y") {
+                ## Export the data to a CSV file
+                $CreateTable | Export-Csv -Path "$ScriptDir\VM_results.csv" -NoTypeInformation
+                $CreateTable | Out-GridView
+            }
+            else {
+                # Display the data without exporting
+                $CreateTable | Out-GridView
+            }
+        Write-Host ""
+        Read-Host "Please press 'enter' to return to the menu"
+        }
+    }
+
+# Display menu and process user's choice
+while ($true) {
+    Show-Menu
+    $choice = Get-Choice
+
+    if ($choice -eq "0") {
+        Remove-SSHSession -SSHSession $SSH
+        Disconnect-VIServer -Server $VMware_IPAddress -Confirm:$false
+        Read-Host "Please run my other script named 'Remove_PSModules.ps1' to remove 'PowerCLI' & 'Posh-SSH'"
+        exit
+    }
+    else {
+        $option = $Options["$choice"]
+        Write-Host "`nAre you sure you want to `"$option`"?" -ForegroundColor Cyan
+
+        switch (Read-Host "(Y/N)") {
+            'Y' {
+                Write-Host "`nYou selected `"$option`"" -ForegroundColor Green
+
+                # Execute action for the selected option
+                $Actions["$choice"].Invoke()
+            }
+            'N' {
+                # Do nothing, it will loop back to the menu
+            }
+
+            default {
+                Write-Host "`nInvalid choice, please select again`n"
+                # Do nothing, it will loop back to the menu
+            }
+        }
+    }
+}
